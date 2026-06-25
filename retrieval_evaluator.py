@@ -17,6 +17,15 @@ from embedder_model_registry import EmbedderModelWrapper
 DEFAULT_EVAL_KS = [1, 3, 5, 10, 20, 50, 100, 150, 200, 400]
 DEFAULT_EVAL_MRR_K = 10
 
+# Series are differentiated by color first; once the color palette is exhausted,
+# the next group reuses the colors with a different line/marker shape.
+CURVE_LINE_SHAPES = [
+    {"mode": "lines", "dash": "solid", "symbol": None},          # solid line
+    {"mode": "lines", "dash": "dash", "symbol": None},           # dashed line
+    {"mode": "lines+markers", "dash": "solid", "symbol": "star"},  # line with stars
+    {"mode": "lines+markers", "dash": "dot", "symbol": "circle"},  # dotted line with circles
+]
+
 # Available eval datasets. Pick which ones to run via Config.eval_dataset_keys.
 EVAL_DATASET_REGISTRY = {
     "qaitest100-500": {
@@ -116,7 +125,7 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         self.name = name
         self.greater_is_better = True
         self.primary_metric = f"{name}_cosine_mrr@{DEFAULT_EVAL_MRR_K}"
-        self.recall_curve_history: list[dict[str, Any]] = []
+        self.eval_history: list[dict[str, Any]] = []
 
     def __call__(self, model: Any, output_path: str | None = None, epoch: int = -1, steps: int = -1):
         import json
@@ -189,7 +198,7 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
             np.mean(reciprocal_ranks)
         )
         metrics[f"{self.name}_runtime"] = time.perf_counter() - started_at
-        self.log_wandb_recall_curve(
+        self.log_wandb_curves(
             eval_ks=eval_ks,
             metrics=metrics,
             epoch=epoch,
@@ -214,7 +223,7 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
 
         return metrics
 
-    def log_wandb_recall_curve(
+    def log_wandb_curves(
         self,
         eval_ks: list[int],
         metrics: dict[str, float],
@@ -222,8 +231,13 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         steps: int,
     ) -> None:
         label = self.eval_label(epoch=epoch, steps=steps)
-        recalls = [metrics[f"{self.name}_cosine_recall@{k}"] for k in eval_ks]
-        self.recall_curve_history.append({"label": label, "recalls": recalls})
+        self.eval_history.append(
+            {
+                "label": label,
+                "recalls": [metrics[f"{self.name}_cosine_recall@{k}"] for k in eval_ks],
+                "hits": [metrics[f"{self.name}_cosine_accuracy@{k}"] for k in eval_ks],
+            }
+        )
 
         try:
             import wandb
@@ -233,31 +247,79 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         if wandb.run is None:
             return
 
-        chart = wandb.plot.line_series(
-            xs=eval_ks,
-            ys=[row["recalls"] for row in self.recall_curve_history],
-            keys=[row["label"] for row in self.recall_curve_history],
-            title=f"{self.name} recall@k",
-            xname="k",
+        # Logged under a "curves/" section so the figures group together and sort
+        # before the eval/ and train/ scalar sections in the wandb workspace.
+        charts = {
+            f"curves/{self.name}_recall_at_k_curve": self.build_curve_figure(
+                eval_ks, "recalls", "recall@k"
+            ),
+            f"curves/{self.name}_hit_at_k_curve": self.build_curve_figure(
+                eval_ks, "hits", "hit@k"
+            ),
+        }
+        # Log both charts in one call pinned to the trainer's global step, so recall
+        # and hit always share the same step. Logging them in separate calls (or with
+        # commit=False) can land them on different steps, which makes the wandb media
+        # panel show only one chart at a given step.
+        if steps is not None and steps >= 0:
+            wandb.log(charts, step=steps)
+        else:
+            wandb.log(charts)
+
+    def series_style(self, index: int) -> dict[str, Any]:
+        """Differentiate series by color first, then by line/marker shape."""
+        import plotly.express as px
+
+        colors = px.colors.qualitative.Plotly
+        color = colors[index % len(colors)]
+        shape = CURVE_LINE_SHAPES[(index // len(colors)) % len(CURVE_LINE_SHAPES)]
+        return {"color": color, **shape}
+
+    def build_curve_figure(self, eval_ks: list[int], value_key: str, ylabel: str):
+        import plotly.graph_objects as go
+
+        fig = go.Figure()
+        for index, row in enumerate(self.eval_history):
+            style = self.series_style(index)
+            fig.add_trace(
+                go.Scatter(
+                    x=eval_ks,
+                    y=row[value_key],
+                    name=row["label"],
+                    mode=style["mode"],
+                    line=dict(color=style["color"], dash=style["dash"], width=2),
+                    marker=dict(color=style["color"], symbol=style["symbol"], size=8),
+                )
+            )
+
+        fig.update_layout(
+            title=f"{self.name} {ylabel}",
+            xaxis_title="k",
+            yaxis_title=ylabel,
+            template="plotly_white",
+            hovermode="x unified",
+            legend=dict(title="checkpoint"),
         )
-        wandb.log({f"eval/{self.name}_recall_at_k_curve": chart})
+        fig.update_xaxes(tickmode="array", tickvals=eval_ks)
+        fig.update_yaxes(range=[0, 1.02])
+        return fig
 
     def eval_label(self, epoch: int, steps: int) -> str:
-        if steps == 0 and not self.recall_curve_history:
+        if steps == 0 and not self.eval_history:
             base_label = "baseline"
         elif steps >= 0:
             base_label = f"step {steps}"
         elif epoch >= 0:
             base_label = f"epoch {epoch}"
         else:
-            base_label = f"eval {len(self.recall_curve_history) + 1}"
+            base_label = f"eval {len(self.eval_history) + 1}"
 
-        existing_labels = {row["label"] for row in self.recall_curve_history}
+        existing_labels = {row["label"] for row in self.eval_history}
         if base_label not in existing_labels:
             return base_label
 
         duplicate_count = sum(
-            row["label"].startswith(base_label) for row in self.recall_curve_history
+            row["label"].startswith(base_label) for row in self.eval_history
         )
         return f"{base_label} #{duplicate_count + 1}"
 

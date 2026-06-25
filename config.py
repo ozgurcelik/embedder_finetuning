@@ -14,7 +14,7 @@ def require_positive(name: str, value: int) -> None:
 @dataclass
 class Config:
     # --- Model ---
-    model_key: str = "all-mpnet-base-v2"
+    model_key: str = "nomic-embed-text-v1.5"
     model: str | None = None  # optional name/path override; model_key still controls encoding
     output_dir: Path | None = None  # defaults to models/<model>-<dataset>
 
@@ -30,18 +30,18 @@ class Config:
     negatives_per_query: int = 4
 
     # --- Optimization ---
-    epochs: int = 5
+    epochs: int = 2
     max_steps: int = -1  # -1 trains for `epochs`
     batch_size: int = 8
     gradient_accumulation_steps: int = 1
     learning_rate: float = 2e-5
     warmup_ratio: float = 0.1
-    max_seq_length: int | None = None  # None uses the model default
+    max_seq_length: int | None = 1024  # None uses the model default (8192 for nomic -> OOM)
     seed: int = 42
 
     # --- Precision ---
     fp16: bool = False
-    bf16: bool = False
+    bf16: bool = True  # A5000 supports bf16; ~halves memory vs fp32
     tf32: bool | None = None  # None uses the trainer default
 
     max_train_samples: int | None = None  # cap after combining splits
