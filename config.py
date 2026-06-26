@@ -14,7 +14,7 @@ def require_positive(name: str, value: int) -> None:
 @dataclass
 class Config:
     # --- Model ---
-    model_key: str = "nomic-embed-text-v1.5"
+    model_key: str = "all-mpnet-base-v2"
     model: str | None = None  # optional name/path override; model_key still controls encoding
     output_dir: Path | None = None  # defaults to models/<model>-<dataset>
 
@@ -41,7 +41,7 @@ class Config:
 
     # --- Precision ---
     fp16: bool = False
-    bf16: bool = True  # A5000 supports bf16; ~halves memory vs fp32
+    bf16: bool = False  # A5000 supports bf16; ~halves memory vs fp32
     tf32: bool | None = None  # None uses the trainer default
 
     max_train_samples: int | None = None  # cap after combining splits

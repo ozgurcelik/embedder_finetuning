@@ -127,6 +127,54 @@ MODEL_REGISTRY: dict[str, type[EmbedderModelWrapper]] = {
 DEFAULT_MODEL_KEY = "all-mpnet-base-v2"
 
 
+def model_max_supported_tokens(model: Any) -> int | None:
+    """Largest sequence length the loaded model can encode without overflowing
+    its position-embedding table. Returns None if it cannot be determined."""
+    limits: list[int] = []
+
+    tokenizer_max = getattr(getattr(model, "tokenizer", None), "model_max_length", None)
+    # Some tokenizers use a huge sentinel value to mean "no limit"; ignore those.
+    if isinstance(tokenizer_max, int) and 0 < tokenizer_max < 100_000:
+        limits.append(tokenizer_max)
+
+    try:
+        hf_config = model[0].auto_model.config
+    except (AttributeError, IndexError, KeyError, TypeError):
+        hf_config = None
+    if hf_config is not None:
+        max_pos = getattr(hf_config, "max_position_embeddings", None)
+        if isinstance(max_pos, int) and max_pos > 0:
+            # MPNet/RoBERTa-style models offset position ids past the padding
+            # index, so the usable length is smaller than the table size.
+            pad_offset_types = {"mpnet", "roberta", "xlm-roberta", "camembert"}
+            pad_idx = getattr(hf_config, "pad_token_id", None)
+            if (
+                getattr(hf_config, "model_type", "") in pad_offset_types
+                and isinstance(pad_idx, int)
+                and pad_idx >= 0
+            ):
+                max_pos = max_pos - pad_idx - 1
+            limits.append(max_pos)
+
+    return min(limits) if limits else None
+
+
+def resolve_max_seq_length(model: Any, requested: int | None) -> int | None:
+    """Clamp the requested max_seq_length to what the model actually supports."""
+    supported = model_max_supported_tokens(model)
+    if supported is None:
+        return requested
+    if requested is None:
+        return supported
+    if requested > supported:
+        print(
+            f"Warning: requested max_seq_length={requested} exceeds the model's "
+            f"supported limit of {supported} tokens; clamping to {supported}."
+        )
+        return supported
+    return requested
+
+
 def apply_prefix(text: str, prefix: str) -> str:
     stripped = text.strip()
     if not prefix or stripped.startswith(prefix):

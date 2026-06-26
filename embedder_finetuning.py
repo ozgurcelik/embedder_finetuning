@@ -12,7 +12,7 @@ from typing import Any
 
 from config import Config
 from dataset_io import select_device
-from embedder_model_registry import resolve_model_wrapper
+from embedder_model_registry import resolve_max_seq_length, resolve_model_wrapper
 from retrieval_evaluator import build_retrieval_evaluator
 from training_data import (
     build_training_rows,
@@ -91,8 +91,10 @@ def train(config: Config) -> None:
         **model_kwargs,
     )
     print(f"Model device: {model.device}")
-    if config.max_seq_length is not None:
-        model.max_seq_length = config.max_seq_length
+    effective_max_seq_length = resolve_max_seq_length(model, config.max_seq_length)
+    if effective_max_seq_length is not None:
+        model.max_seq_length = effective_max_seq_length
+    print(f"Model max_seq_length: {model.max_seq_length}")
     train_loss = build_loss(
         model=model,
         use_cached_mnrl=config.use_cached_mnrl,
