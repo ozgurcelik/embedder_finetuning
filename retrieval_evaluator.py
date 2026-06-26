@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from sentence_transformers.sentence_transformer.evaluation import SentenceEvaluator
+    from sentence_transformers.evaluation import SentenceEvaluator
 except ModuleNotFoundError:
     SentenceEvaluator = object
 
@@ -383,6 +383,6 @@ def build_retrieval_evaluator(
     if len(evaluators) == 1:
         return evaluators[0]
 
-    from sentence_transformers.sentence_transformer.evaluation import SequentialEvaluator
+    from sentence_transformers.evaluation import SequentialEvaluator
 
     return SequentialEvaluator(evaluators)

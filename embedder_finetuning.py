@@ -24,7 +24,7 @@ from training_data import (
 
 
 def build_loss(model: Any, use_cached_mnrl: bool, cached_mini_batch_size: int):
-    from sentence_transformers.sentence_transformer import losses
+    from sentence_transformers import losses
 
     if use_cached_mnrl:
         return losses.CachedMultipleNegativesRankingLoss(
@@ -67,12 +67,14 @@ def train(config: Config) -> None:
         SentenceTransformerTrainer,
         SentenceTransformerTrainingArguments,
     )
-    from sentence_transformers.sentence_transformer.training_args import BatchSamplers
+    from sentence_transformers.training_args import BatchSamplers
 
     model_config = resolve_model_wrapper(config.model_key, config.model)
     dataset_spec = dataset_spec_from_args(config)
     if config.output_dir is None:
         config.output_dir = default_output_dir(model_config, dataset_spec)
+
+    hub_model_id = config.hub_model_id or f"{config.hub_account}/{config.output_dir.name}"
 
     rows = build_training_rows(config, dataset_spec, model_config)
     print_dataset_summary(rows)
@@ -102,6 +104,11 @@ def train(config: Config) -> None:
     )
     evaluator = build_retrieval_evaluator(config, model_config)
 
+    # The trainer's push_to_hub only drives intermediate, per-save-step uploads. The
+    # final end-of-training push is done explicitly after trainer.train() and is gated
+    # on config.push_to_hub alone, so end-only pushing works regardless of this flag.
+    push_checkpoints_every_save = config.push_to_hub and config.push_every_save_step
+
     training_args = SentenceTransformerTrainingArguments(
         output_dir=str(config.output_dir),
         num_train_epochs=config.epochs,
@@ -109,7 +116,7 @@ def train(config: Config) -> None:
         per_device_train_batch_size=config.batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
-        warmup_steps=config.warmup_ratio,
+        warmup_ratio=config.warmup_ratio,
         batch_sampler=BatchSamplers.NO_DUPLICATES,
         save_strategy=config.save_strategy,
         save_steps=config.save_steps,
@@ -131,6 +138,10 @@ def train(config: Config) -> None:
         data_seed=config.seed,
         dataloader_pin_memory=False,
         disable_tqdm=False,
+        push_to_hub=push_checkpoints_every_save,
+        hub_model_id=hub_model_id,
+        hub_strategy="every_save",
+        hub_private_repo=config.hub_private,
     )
 
     trainer = SentenceTransformerTrainer(
@@ -142,9 +153,27 @@ def train(config: Config) -> None:
     )
     trainer.train()
 
-    final_model_dir = config.output_dir / "final"
-    model.save_pretrained(str(final_model_dir))
-    print(f"Saved final model to {final_model_dir}")
+    if config.save_model_locally:
+        final_model_dir = config.output_dir / "final"
+        model.save_pretrained(str(final_model_dir))
+        print(f"Saved final model to {final_model_dir}")
+
+    if config.push_to_hub:
+        # Explicitly upload the trained model. The trainer's hub_strategy only handles
+        # intermediate (every_save) pushes and repo creation; the final model must be
+        # pushed here, otherwise the repo ends up containing only .gitattributes.
+        print(f"Pushing model to https://huggingface.co/{hub_model_id} ...")
+        model.push_to_hub(
+            hub_model_id,
+            private=config.hub_private,
+            exist_ok=True,
+        )
+        print(f"Pushed model to https://huggingface.co/{hub_model_id}")
+    elif not config.save_model_locally:
+        print(
+            "Note: save_model_locally and push_to_hub are both False; "
+            "the trained model was not exported (only trainer checkpoints, if any, remain)."
+        )
 
 
 def main() -> int:

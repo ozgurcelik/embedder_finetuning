@@ -70,6 +70,14 @@ class Config:
     eval_at_start: bool = True
     no_eval_csv: bool = False  # set True to skip writing evaluator metric files
 
+    # --- Saving & Hugging Face Hub ---
+    save_model_locally: bool = False  # save the final model under output_dir/final
+    push_to_hub: bool = True  # push the trained model to the Hugging Face Hub
+    hub_account: str = "ozgur-celik"  # HF user/org the model is pushed under
+    hub_model_id: str | None = None  # full repo id; defaults to <hub_account>/<output_dir name>
+    push_every_save_step: bool = False  # push at every save step, not only at the end
+    hub_private: bool = True  # create the hub repo as private
+
     # --- Misc ---
     dry_run: bool = False  # prepare data, print a summary, then exit before training
     use_cached_mnrl: bool = False  # CachedMultipleNegativesRankingLoss for bigger batches
@@ -120,3 +128,10 @@ class Config:
             raise ValueError("wandb_entity cannot be empty when W&B logging is enabled")
         if self.wandb and not self.wandb_project:
             raise ValueError("wandb_project cannot be empty when W&B logging is enabled")
+        if self.push_to_hub:
+            if not self.hub_model_id and not self.hub_account:
+                raise ValueError("Set hub_account or hub_model_id to push to the Hub")
+            if self.push_every_save_step and self.save_strategy == "no":
+                raise ValueError(
+                    "push_every_save_step requires save_strategy to be 'steps' or 'epoch'"
+                )
