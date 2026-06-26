@@ -38,6 +38,7 @@ TRAIN_DATASET_REGISTRY = {
         "splits": ("train", "validation", "test"),
         "query_column": "question",
         "positive_column": "context",
+        "answer_column": "answers",  # SQuAD-style {answer_start: [...], text: [...]}
         "output_suffix": "oqa-v1",
     },
 }
@@ -74,6 +75,45 @@ def first_present(row: dict[str, Any], column: str) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     raise ValueError(f"Column {column!r} is missing or empty")
+
+
+def answer_span_bounds(answers: Any) -> tuple[int, int] | None:
+    """Return (start, end) char offsets of the first answer span, if available."""
+    if not isinstance(answers, dict):
+        return None
+    starts = answers.get("answer_start")
+    texts = answers.get("text")
+    if not isinstance(starts, list) or not isinstance(texts, list):
+        return None
+    if not starts or not texts:
+        return None
+    start = starts[0]
+    text = texts[0]
+    if not isinstance(start, int) or not isinstance(text, str):
+        return None
+    return start, start + len(text)
+
+
+def reduce_context(context: str, answers: Any, max_chars: int) -> str:
+    """Shorten context to <= max_chars, keeping the answer span when known.
+
+    Without answer info we head-truncate. With an answer span we center a window on
+    the answer so the relevant text survives (the tokenizer would otherwise cut the
+    tail of a long context, potentially dropping the answer entirely).
+    """
+    if max_chars <= 0 or len(context) <= max_chars:
+        return context
+
+    bounds = answer_span_bounds(answers)
+    if bounds is None:
+        return context[:max_chars].strip()
+
+    start, end = bounds
+    center = (start + end) // 2
+    lo = max(0, center - max_chars // 2)
+    hi = min(len(context), lo + max_chars)
+    lo = max(0, hi - max_chars)
+    return context[lo:hi].strip()
 
 
 def load_source_dataset(dataset_spec: dict[str, Any]):
@@ -258,8 +298,11 @@ def build_huggingface_training_rows(
     rows: list[dict[str, str]] = []
     seen_pairs = set()
     skipped = 0
+    num_reduced = 0
     query_column = dataset_spec["query_column"]
     positive_column = dataset_spec["positive_column"]
+    answer_column = dataset_spec.get("answer_column")
+    max_chars = model_config.context_max_chars
 
     for row in dataset:
         row_dict = dict(row)
@@ -269,6 +312,13 @@ def build_huggingface_training_rows(
         except ValueError:
             skipped += 1
             continue
+
+        if max_chars is not None:
+            answers = row_dict.get(answer_column) if answer_column else None
+            reduced_positive = reduce_context(positive, answers, max_chars)
+            if len(reduced_positive) < len(positive):
+                num_reduced += 1
+            positive = reduced_positive
 
         pair_key = (query, positive)
         if pair_key in seen_pairs:
@@ -289,6 +339,11 @@ def build_huggingface_training_rows(
     rng = random.Random(args.seed)
     rng.shuffle(rows)
     print(f"Prepared {len(rows)} training pairs; skipped {skipped} empty/duplicate rows")
+    if max_chars is not None:
+        print(
+            f"Context reduction: capped positives to {max_chars} chars "
+            f"(answer-centered when available); {num_reduced} contexts shortened"
+        )
     return rows
 
 

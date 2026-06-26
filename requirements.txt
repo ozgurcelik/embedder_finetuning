@@ -7,3 +7,4 @@ numpy>=1.24.0
 wandb>=0.17.0
 plotly>=5.20.0
 einops>=0.7.0
+hf_transfer>=0.1.6

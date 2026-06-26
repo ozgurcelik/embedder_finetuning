@@ -19,7 +19,7 @@ class Config:
     output_dir: Path | None = None  # defaults to models/<model>-<dataset>
 
     # --- Training dataset ---
-    train_dataset_key: str = "qaitrain500-500"
+    train_dataset_key: str = "oqa-v1"
     train_dataset_name: str | None = None  # Hugging Face dataset name override
     train_dataset_config: str | None = None  # Hugging Face dataset config override
     train_splits: list[str] | None = None  # splits to combine; ["all"] for every split
@@ -72,11 +72,12 @@ class Config:
 
     # --- Saving & Hugging Face Hub ---
     save_model_locally: bool = False  # save the final model under output_dir/final
-    push_to_hub: bool = True  # push the trained model to the Hugging Face Hub
+    push_to_hub: bool = False  # push the trained model to the Hugging Face Hub (off by default)
     hub_account: str = "ozgur-celik"  # HF user/org the model is pushed under
     hub_model_id: str | None = None  # full repo id; defaults to <hub_account>/<output_dir name>
+    hub_version: str | None = None  # optional version suffix, e.g. "v2" -> <repo>-v2
     push_every_save_step: bool = False  # push at every save step, not only at the end
-    hub_private: bool = True  # create the hub repo as private
+    hub_private: bool = False  # create the hub repo as private
 
     # --- Misc ---
     dry_run: bool = False  # prepare data, print a summary, then exit before training

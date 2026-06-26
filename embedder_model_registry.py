@@ -17,6 +17,10 @@ class EmbedderModelWrapper:
     trust_remote_code = False
     query_prefix = ""
     document_prefix = ""
+    # Cap for Hugging Face dataset positives/contexts, in characters. None keeps the
+    # full text. Set per model to roughly match its usable context window so long
+    # passages are trimmed (answer-centered) instead of silently tokenizer-truncated.
+    context_max_chars: int | None = None
 
     def __init__(self, model_name_or_path: str | None = None) -> None:
         self.model_name = model_name_or_path or self.default_model_name
@@ -111,6 +115,8 @@ class AllMpnetBaseV2(EmbedderModelWrapper):
     key = "all-mpnet-base-v2"
     default_model_name = "sentence-transformers/all-mpnet-base-v2"
     output_dir_name = "all-mpnet-base-v2"
+    # ~382 usable tokens (384 limit minus 2 special tokens) at ~3.3 chars/token.
+    context_max_chars = 1200
 
 
 MODEL_WRAPPERS = (

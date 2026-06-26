@@ -61,6 +61,30 @@ def configure_wandb(config: Config) -> str:
     return "wandb"
 
 
+def run_final_eval(trainer: Any, evaluator: Any, model: Any, config: Config) -> None:
+    """Evaluate once at the final global step so the last checkpoint shows up on the
+    eval curves. Skipped when the final step already coincided with a scheduled eval
+    (i.e. an "epoch" strategy, or a "steps" strategy where the step is a multiple of
+    eval_steps), to avoid logging a duplicate point."""
+    if evaluator is None or config.eval_strategy == "no":
+        return
+
+    global_step = trainer.state.global_step
+    if config.eval_strategy == "epoch":
+        return
+    if config.eval_strategy == "steps" and global_step % config.eval_steps == 0:
+        return
+
+    epoch = int(trainer.state.epoch) if trainer.state.epoch is not None else -1
+    print(f"Running end-of-run evaluation at step {global_step} ...")
+    evaluator(
+        model,
+        output_path=str(config.output_dir),
+        epoch=epoch,
+        steps=global_step,
+    )
+
+
 def train(config: Config) -> None:
     from sentence_transformers import (
         SentenceTransformer,
@@ -74,7 +98,13 @@ def train(config: Config) -> None:
     if config.output_dir is None:
         config.output_dir = default_output_dir(model_config, dataset_spec)
 
-    hub_model_id = config.hub_model_id or f"{config.hub_account}/{config.output_dir.name}"
+    if config.hub_model_id:
+        hub_model_id = config.hub_model_id
+    else:
+        repo_name = config.output_dir.name
+        if config.hub_version:
+            repo_name = f"{repo_name}-{config.hub_version}"
+        hub_model_id = f"{config.hub_account}/{repo_name}"
 
     rows = build_training_rows(config, dataset_spec, model_config)
     print_dataset_summary(rows)
@@ -152,6 +182,8 @@ def train(config: Config) -> None:
         evaluator=evaluator,
     )
     trainer.train()
+
+    run_final_eval(trainer, evaluator, model, config)
 
     if config.save_model_locally:
         final_model_dir = config.output_dir / "final"
