@@ -31,6 +31,12 @@ TRAIN_DATASET_REGISTRY = {
         "facts_path": DEFAULT_TRAIN_FACTS_PATH,
         "output_suffix": "qaitrain500-500",
     },
+    "qaitrain500-2-500": {
+        "source": "local_query_fact_ids",
+        "query_fact_ids_path": PROJECT_ROOT / "datasets/qaitrain500_2_500_query_fact_ids.json",
+        "facts_path": PROJECT_ROOT / "datasets/qaitrain500_2_500_non_summary_dbelements.json",
+        "output_suffix": "qaitrain500-2-500",
+    },
     "oqa-v1": {
         "source": "huggingface",
         "name": "m-rousseau/oqa-v1",

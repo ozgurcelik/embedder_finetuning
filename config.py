@@ -68,7 +68,7 @@ class Config:
     positive_column: str | None = None
     train_query_fact_ids: Path | None = None  # local training JSON override
     train_facts: Path | None = None  # local fact-text JSON override
-    negatives_per_query: int = 4
+    negatives_per_query: int = 4  # explicit negatives per row; pool is 20 hard + 20 soft (=40)
 
     # --- Optimization ---
     epochs: int = 2
@@ -104,7 +104,7 @@ class Config:
     eval_steps: int = 100  # only used when eval_strategy == "steps"
     # Which eval datasets to run; keys come from EVAL_DATASET_REGISTRY in retrieval_evaluator.py
     eval_dataset_keys: list[str] = field(
-        default_factory=lambda: ["qaitest100-500", "qaitest100-500-2"]
+        default_factory=lambda: ["qaitest500-500", "qaitest100-500-2"]
     )
     eval_batch_size: int = 32
     eval_corpus_chunk_size: int = 50000
@@ -133,7 +133,10 @@ class Config:
         default_factory=lambda: [
             StageConfig(name="oqa-v1", train_dataset_key="oqa-v1", epochs=1),
             StageConfig(
-                name="qaitrain500-500", train_dataset_key="qaitrain500-500", epochs=2
+                name="qaitrain500-500", train_dataset_key="qaitrain500-500", epochs=1
+            ),
+            StageConfig(
+                name="qaitrain500-2-500", train_dataset_key="qaitrain500-2-500", epochs=1
             ),
         ]
     )

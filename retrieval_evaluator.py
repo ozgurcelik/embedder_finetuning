@@ -32,6 +32,10 @@ CURVE_LINE_SHAPES = [
 
 # Available eval datasets. Pick which ones to run via Config.eval_dataset_keys.
 EVAL_DATASET_REGISTRY = {
+    "qaitest500-500": {
+        "query_fact_ids_path": PROJECT_ROOT / "datasets/qaitest500_500_query_fact_ids.json",
+        "facts_path": PROJECT_ROOT / "datasets/qaitest500_500_non_summary_dbelements.json",
+    },
     "qaitest100-500": {
         "query_fact_ids_path": PROJECT_ROOT / "datasets/qaitest100_500_query_fact_ids.json",
         "facts_path": PROJECT_ROOT / "datasets/qaitest100_500_non_summary_dbelements.json",
@@ -133,6 +137,10 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         # Prefix added to curve series labels so multi-stage chains stay distinguishable
         # (e.g. "oqa-v1 epoch 1"). Empty for single-stage runs.
         self.stage_label = ""
+        # Added to the trainer's per-stage global step before logging to wandb. Each stage
+        # restarts global_step at 0, so a chain that shares one wandb run offsets later
+        # stages by the cumulative step count to keep the run's step axis monotonic.
+        self.step_offset = 0
 
     def __call__(self, model: Any, output_path: str | None = None, epoch: int = -1, steps: int = -1):
         import json
@@ -295,19 +303,20 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         if wandb.run is None:
             return
 
-        # Logged under a "curves/" section so the figures group together and sort
-        # before the eval/ and train/ scalar sections in the wandb workspace.
+        # Split into "recall_curves/" and "hit_curves/" sections so recall and hit figures
+        # group separately in the wandb workspace (and both sort before the eval/ and
+        # train/ scalar sections).
         charts = {
-            f"curves/{self.name}_recall_at_k_curve": self.build_curve_figure(
+            f"recall_curves/{self.name}_recall_at_k_curve": self.build_curve_figure(
                 eval_ks, "recalls", "recall@k", "k"
             ),
-            f"curves/{self.name}_hit_at_k_curve": self.build_curve_figure(
-                eval_ks, "hits", "hit@k", "k"
-            ),
-            f"curves/{self.name}_recall_at_chars_curve": self.build_curve_figure(
+            f"recall_curves/{self.name}_recall_at_chars_curve": self.build_curve_figure(
                 char_budgets, "char_recalls", "recall@chars", "cumulative characters"
             ),
-            f"curves/{self.name}_hit_at_chars_curve": self.build_curve_figure(
+            f"hit_curves/{self.name}_hit_at_k_curve": self.build_curve_figure(
+                eval_ks, "hits", "hit@k", "k"
+            ),
+            f"hit_curves/{self.name}_hit_at_chars_curve": self.build_curve_figure(
                 char_budgets, "char_hits", "hit@chars", "cumulative characters"
             ),
         }
@@ -316,7 +325,7 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         # commit=False) can land them on different steps, which makes the wandb media
         # panel show only one chart at a given step.
         if steps is not None and steps >= 0:
-            wandb.log(charts, step=steps)
+            wandb.log(charts, step=steps + self.step_offset)
         else:
             wandb.log(charts)
 
@@ -402,6 +411,20 @@ def set_evaluator_stage_label(evaluator: Any, stage_label: str) -> None:
     for sub_evaluator in getattr(evaluator, "evaluators", []):
         if isinstance(sub_evaluator, RegistryRetrievalEvaluator):
             sub_evaluator.stage_label = stage_label
+
+
+def set_evaluator_step_offset(evaluator: Any, step_offset: int) -> None:
+    """Set the wandb step offset on a RegistryRetrievalEvaluator or every sub-evaluator
+    inside a SequentialEvaluator, so a chain sharing one wandb run keeps a monotonic step
+    axis across stages (each stage's trainer restarts global_step at 0)."""
+    if evaluator is None:
+        return
+    if isinstance(evaluator, RegistryRetrievalEvaluator):
+        evaluator.step_offset = step_offset
+        return
+    for sub_evaluator in getattr(evaluator, "evaluators", []):
+        if isinstance(sub_evaluator, RegistryRetrievalEvaluator):
+            sub_evaluator.step_offset = step_offset
 
 
 def build_single_retrieval_evaluator(

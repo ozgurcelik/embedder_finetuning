@@ -6,6 +6,7 @@ Edit run settings in config.py, then run this file: python3 embedder_finetuning.
 
 from __future__ import annotations
 
+import gc
 import os
 import sys
 from typing import Any
@@ -13,7 +14,11 @@ from typing import Any
 from config import Config, StageConfig, resolve_stage_config
 from dataset_io import select_device
 from embedder_model_registry import resolve_max_seq_length, resolve_model_wrapper
-from retrieval_evaluator import build_retrieval_evaluator, set_evaluator_stage_label
+from retrieval_evaluator import (
+    build_retrieval_evaluator,
+    set_evaluator_stage_label,
+    set_evaluator_step_offset,
+)
 from training_data import (
     DEFAULT_OUTPUT_ROOT,
     build_training_rows,
@@ -185,6 +190,58 @@ def save_and_push_model(config: Config, model: Any, hub_model_id: str) -> None:
         )
 
 
+def make_chain_wandb_callback() -> Any:
+    """Build a trainer callback that logs scalars to a single shared wandb run across all
+    chain stages. Each stage's trainer restarts global_step at 0, so the callback offsets
+    the step by the cumulative count of earlier stages to keep the run's step axis
+    monotonic. Used instead of the trainer's built-in wandb integration (report_to="wandb")
+    for chains, which would otherwise open a separate run per stage."""
+    from transformers import TrainerCallback
+
+    class ChainWandbCallback(TrainerCallback):
+        def __init__(self) -> None:
+            self.step_offset = 0
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            import wandb
+
+            if wandb.run is None or not logs:
+                return
+            global_step = self.step_offset + state.global_step
+            payload: dict[str, float] = {}
+            for key, value in logs.items():
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                section = "eval" if key.startswith("eval_") else "train"
+                payload[f"{section}/{key}"] = value
+            if not payload:
+                return
+            payload["train/global_step"] = global_step
+            wandb.log(payload, step=global_step)
+
+    return ChainWandbCallback()
+
+
+def release_trainer_memory(trainer: Any) -> None:
+    """Free a finished stage's trainer (and its optimizer state) before the next stage
+    builds its own. In a chain this prevents the previous stage's AdamW state, which is
+    roughly twice the model size, from sitting on the GPU and starving the next stage."""
+    try:
+        trainer.optimizer = None
+        trainer.lr_scheduler = None
+    except AttributeError:
+        pass
+    del trainer
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ModuleNotFoundError:
+        pass
+
+
 def run_stage_dry_run(config: Config, model_config: Any, stages: list[StageConfig]) -> None:
     multistage = len(stages) > 1
     for index, stage in enumerate(stages, start=1):
@@ -231,6 +288,17 @@ def train(config: Config) -> None:
     push_checkpoints_every_save = config.push_to_hub and config.push_every_save_step
     base_run_name = config.wandb_run_name or run_root.name
 
+    # For a chain we open a single wandb run up front and log every stage into it (with an
+    # offset step axis), instead of letting each stage's trainer open its own run.
+    chain_wandb = report_to == "wandb" and multistage
+    chain_callback = None
+    step_offset = 0
+    if chain_wandb:
+        import wandb
+
+        wandb.init(name=base_run_name)
+        chain_callback = make_chain_wandb_callback()
+
     for index, stage in enumerate(stages, start=1):
         stage_config = resolve_stage_config(config, stage)
         if multistage:
@@ -253,10 +321,13 @@ def train(config: Config) -> None:
             use_cached_mnrl=stage_config.use_cached_mnrl,
             cached_mini_batch_size=stage_config.cached_mini_batch_size,
         )
+        # In a chain, the per-stage trainer must not open its own wandb run; we log to the
+        # single shared run via chain_callback instead.
+        stage_report_to = "none" if chain_wandb else report_to
         training_args = build_training_args(
             stage_config,
             device,
-            report_to,
+            stage_report_to,
             hub_model_id,
             push_checkpoints_every_save,
             is_first_stage=index == 1,
@@ -268,16 +339,26 @@ def train(config: Config) -> None:
             loss=train_loss,
             evaluator=evaluator,
         )
+        if chain_wandb:
+            chain_callback.step_offset = step_offset
+            set_evaluator_step_offset(evaluator, step_offset)
+            trainer.add_callback(chain_callback)
         trainer.train()
         run_final_eval(trainer, evaluator, model, stage_config)
 
-        # Finish the per-stage W&B run so the next stage starts a fresh run with its own
-        # monotonic step axis. The evaluator keeps its history, so each subsequent stage's
-        # run still shows the full accumulated curve across all stages so far.
-        if report_to == "wandb" and multistage:
-            import wandb
+        # Carry the cumulative step forward so the next stage's logs continue past this
+        # one on the shared run's step axis instead of restarting at 0.
+        if chain_wandb:
+            step_offset += trainer.state.global_step
 
-            wandb.finish()
+        # Free the stage's optimizer/scheduler state before the next stage allocates its
+        # own, so AdamW state from earlier stages does not accumulate on the GPU.
+        release_trainer_memory(trainer)
+
+    if chain_wandb:
+        import wandb
+
+        wandb.finish()
 
     save_and_push_model(config, model, hub_model_id)
 
