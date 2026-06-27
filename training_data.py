@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,19 @@ TRAIN_DATASET_REGISTRY = {
         "output_suffix": "oqa-v1",
     },
 }
+
+
+def available_train_dataset_keys() -> list[str]:
+    return sorted(TRAIN_DATASET_REGISTRY)
+
+
+def resolve_train_dataset_keys(args: Config) -> list[str]:
+    """The dataset key(s) a stage trains on. `train_dataset_keys` (a list) takes precedence
+    and mixes several registered datasets into one stage; otherwise the single
+    `train_dataset_key` is used."""
+    if args.train_dataset_keys:
+        return list(args.train_dataset_keys)
+    return [args.train_dataset_key]
 
 
 def dataset_spec_from_args(args: Config) -> dict[str, Any]:
@@ -289,6 +303,67 @@ def build_training_rows(
     if source == "huggingface":
         return build_huggingface_training_rows(args, dataset_spec, model_config)
     raise ValueError(f"Unknown training dataset source: {source!r}")
+
+
+def build_mixed_training_rows(
+    args: Config,
+    model_config: EmbedderModelWrapper,
+) -> list[dict[str, str]]:
+    """Build the training rows for one stage, mixing several registered datasets into a
+    single pool when `train_dataset_keys` lists more than one. Datasets are combined at the
+    row level (each row already carries its own text), then shuffled together and capped, so
+    one stage trains on an interleaved mix instead of running them as separate stages.
+
+    Mixed datasets must produce rows with the same columns (e.g. all qai local datasets share
+    anchor/positive/negative_1..N); mixing sources with different shapes (a local dataset that
+    has explicit negatives with a plain anchor/positive HF dataset) is rejected, since the
+    trainer needs a single consistent schema across all rows."""
+    keys = resolve_train_dataset_keys(args)
+
+    # Single dataset: keep the original path so per-dataset overrides (HF name/splits/columns,
+    # local path overrides) still apply exactly as before.
+    if not args.train_dataset_keys:
+        return build_training_rows(args, dataset_spec_from_args(args), model_config)
+    if len(keys) == 1:
+        return build_training_rows(
+            args, dict(TRAIN_DATASET_REGISTRY[keys[0]]), model_config
+        )
+
+    # Build each dataset without the per-dataset cap so max_train_samples applies to the
+    # combined pool, then concatenate, shuffle together, and cap once.
+    per_dataset_args = replace(args, max_train_samples=None)
+    combined: list[dict[str, str]] = []
+    per_key_counts: list[str] = []
+    for key in keys:
+        rows = build_training_rows(
+            per_dataset_args, dict(TRAIN_DATASET_REGISTRY[key]), model_config
+        )
+        per_key_counts.append(f"{key}={len(rows)}")
+        combined.extend(rows)
+
+    if not combined:
+        raise ValueError("No training rows were produced from the mixed datasets")
+
+    column_sets = {frozenset(row) for row in combined}
+    if len(column_sets) > 1:
+        shapes = sorted(sorted(columns) for columns in column_sets)
+        raise ValueError(
+            "Cannot mix training datasets with different columns "
+            f"(found {len(column_sets)} distinct row shapes: {shapes}). "
+            "Mix only datasets that produce the same columns, e.g. local qai datasets that "
+            "all use the same negatives_per_query."
+        )
+
+    rng = random.Random(args.seed)
+    rng.shuffle(combined)
+    if args.max_train_samples is not None:
+        combined = combined[: args.max_train_samples]
+
+    print(
+        f"Mixed {len(keys)} datasets into {len(combined)} combined training rows "
+        f"({', '.join(per_key_counts)})"
+    )
+    return combined
 
 
 def build_huggingface_training_rows(

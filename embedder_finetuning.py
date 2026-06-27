@@ -21,7 +21,7 @@ from retrieval_evaluator import (
 )
 from training_data import (
     DEFAULT_OUTPUT_ROOT,
-    build_training_rows,
+    build_mixed_training_rows,
     dataset_spec_from_args,
     default_output_dir,
     print_dataset_summary,
@@ -248,9 +248,7 @@ def run_stage_dry_run(config: Config, model_config: Any, stages: list[StageConfi
         stage_config = resolve_stage_config(config, stage)
         if multistage:
             print(f"\n=== Stage {index}/{len(stages)}: {stage.name} ===")
-        rows = build_training_rows(
-            stage_config, dataset_spec_from_args(stage_config), model_config
-        )
+        rows = build_mixed_training_rows(stage_config, model_config)
         print_dataset_summary(rows)
     print("Dry run complete; no model was trained.")
 
@@ -311,9 +309,7 @@ def train(config: Config) -> None:
             stage_config.wandb_run_name = base_run_name
             set_evaluator_stage_label(evaluator, "")
 
-        rows = build_training_rows(
-            stage_config, dataset_spec_from_args(stage_config), model_config
-        )
+        rows = build_mixed_training_rows(stage_config, model_config)
         print_dataset_summary(rows)
         train_dataset = rows_to_dataset(rows)
         train_loss = build_loss(

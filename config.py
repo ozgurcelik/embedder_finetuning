@@ -24,6 +24,8 @@ class StageConfig:
 
     # --- Training dataset (None inherits from Config) ---
     train_dataset_key: str | None = None
+    # Mix several registered datasets into this one stage (overrides train_dataset_key).
+    train_dataset_keys: list[str] | None = None
     train_dataset_name: str | None = None
     train_dataset_config: str | None = None
     train_splits: list[str] | None = None
@@ -61,6 +63,11 @@ class Config:
 
     # --- Training dataset ---
     train_dataset_key: str = "qaitrain500-500"
+    # Mix several registered datasets into a single stage (keys come from
+    # TRAIN_DATASET_REGISTRY in training_data.py). When set, this overrides train_dataset_key
+    # and the listed datasets are combined at the row level, shuffled together, and trained
+    # as one pool. Example: ["qaitrain500-500", "qaitrain500-2-500"].
+    train_dataset_keys: list[str] | None = None
     train_dataset_name: str | None = None  # Hugging Face dataset name override
     train_dataset_config: str | None = None  # Hugging Face dataset config override
     train_splits: list[str] | None = None  # splits to combine; ["all"] for every split
@@ -132,11 +139,16 @@ class Config:
     stages: list[StageConfig] = field(
         default_factory=lambda: [
             StageConfig(name="oqa-v1", train_dataset_key="oqa-v1", epochs=1),
+            # StageConfig(
+            #     name="qaitrain500-500", train_dataset_key="qaitrain500-500", epochs=1
+            # ),
+            # StageConfig(
+            #     name="qaitrain500-2-500", train_dataset_key="qaitrain500-2-500", epochs=1
+            # ),
             StageConfig(
-                name="qaitrain500-500", train_dataset_key="qaitrain500-500", epochs=1
-            ),
-            StageConfig(
-                name="qaitrain500-2-500", train_dataset_key="qaitrain500-2-500", epochs=1
+                name="qai-mixed",
+                train_dataset_keys=["qaitrain500-500", "qaitrain500-2-500"],
+                epochs=2,
             ),
         ]
     )
@@ -172,6 +184,19 @@ class Config:
                 raise ValueError(
                     f"Unknown eval_dataset_keys {unknown_keys}. Available: {available}"
                 )
+        # Imported lazily to avoid a circular import (training_data imports config).
+        from training_data import available_train_dataset_keys, resolve_train_dataset_keys
+
+        if self.train_dataset_keys is not None and not self.train_dataset_keys:
+            raise ValueError("train_dataset_keys cannot be an empty list; use None instead")
+        unknown_train_keys = sorted(
+            set(resolve_train_dataset_keys(self)) - set(available_train_dataset_keys())
+        )
+        if unknown_train_keys:
+            available = ", ".join(available_train_dataset_keys())
+            raise ValueError(
+                f"Unknown train dataset key(s) {unknown_train_keys}. Available: {available}"
+            )
         if self.max_train_samples is not None:
             require_positive("max_train_samples", self.max_train_samples)
         require_positive("negatives_per_query", self.negatives_per_query)
