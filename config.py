@@ -19,7 +19,7 @@ class Config:
     output_dir: Path | None = None  # defaults to models/<model>-<dataset>
 
     # --- Training dataset ---
-    train_dataset_key: str = "oqa-v1"
+    train_dataset_key: str = "qaitrain500-500"
     train_dataset_name: str | None = None  # Hugging Face dataset name override
     train_dataset_config: str | None = None  # Hugging Face dataset config override
     train_splits: list[str] | None = None  # splits to combine; ["all"] for every split
@@ -59,8 +59,8 @@ class Config:
     wandb_mode: str | None = None  # "online" | "offline"
 
     # --- Evaluation ---
-    eval_strategy: str = "steps"  # "steps" | "epoch" | "no"
-    eval_steps: int = 100
+    eval_strategy: str = "epoch"  # "steps" | "epoch" | "no"
+    eval_steps: int = 100  # only used when eval_strategy == "steps"
     # Which eval datasets to run; keys come from EVAL_DATASET_REGISTRY in retrieval_evaluator.py
     eval_dataset_keys: list[str] = field(
         default_factory=lambda: ["qaitest100-500", "qaitest100-500-2"]

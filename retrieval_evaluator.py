@@ -16,6 +16,10 @@ from embedder_model_registry import EmbedderModelWrapper
 
 DEFAULT_EVAL_KS = [1, 3, 5, 10, 20, 50, 100, 150, 200, 400]
 DEFAULT_EVAL_MRR_K = 10
+# Cumulative character budgets over the ranked documents, for recall/hit "@chars" curves.
+DEFAULT_EVAL_CHAR_BUDGETS = [
+    1000, 2500, 5000, 10000, 25000, 50000, 75000, 100000, 125000, 150000, 200000
+]
 
 # Series are differentiated by color first; once the color palette is exhausted,
 # the next group reuses the colors with a different line/marker shape.
@@ -156,7 +160,21 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
             dtype=np.float32,
         )
 
-        max_k = min(max(max(DEFAULT_EVAL_KS), DEFAULT_EVAL_MRR_K), len(corpus_ids))
+        corpus_lengths = np.array([len(text) for text in corpus_texts], dtype=np.int64)
+        char_budgets = DEFAULT_EVAL_CHAR_BUDGETS
+
+        # Rank deep enough to cover both the largest element-k and the largest character
+        # budget. The worst case for the char budget is that the top-ranked documents are
+        # the shortest ones in the corpus, so size max_k from the smallest documents whose
+        # lengths sum to the largest budget. That guarantees the ranked list always spans
+        # every budget without ranking the entire corpus.
+        sorted_cumulative_lengths = np.cumsum(np.sort(corpus_lengths))
+        char_cover_k = (
+            int(np.searchsorted(sorted_cumulative_lengths, max(char_budgets), side="left")) + 1
+        )
+        element_max_k = max(max(DEFAULT_EVAL_KS), DEFAULT_EVAL_MRR_K)
+        max_k = min(len(corpus_ids), max(element_max_k, char_cover_k))
+
         ranked_indices = chunked_top_k_indices(
             query_embeddings=query_embeddings,
             corpus_embeddings=corpus_embeddings,
@@ -168,11 +186,14 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         eval_ks = [k for k in DEFAULT_EVAL_KS if k <= len(corpus_ids)]
         recall_values = {k: [] for k in eval_ks}
         accuracy_hits = {k: 0 for k in eval_ks}
+        char_recall_values = {budget: [] for budget in char_budgets}
+        char_accuracy_hits = {budget: 0 for budget in char_budgets}
         reciprocal_ranks = []
 
         for query_index, query_id in enumerate(query_ids):
             relevant_ids = self.relevant_docs[query_id]
-            ranked_doc_ids = [corpus_ids[index] for index in ranked_indices[query_index]]
+            ranked_for_query = ranked_indices[query_index]
+            ranked_doc_ids = [corpus_ids[index] for index in ranked_for_query]
             hit_mask = np.array(
                 [doc_id in relevant_ids for doc_id in ranked_doc_ids],
                 dtype=np.int32,
@@ -190,16 +211,33 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
                 recall_values[k].append(found / len(relevant_ids))
                 accuracy_hits[k] += int(found > 0)
 
+            # Walk the ranked docs, accumulating their character lengths; at each budget,
+            # count only the documents that fully fit within it.
+            cumulative_chars = np.cumsum(corpus_lengths[ranked_for_query])
+            for budget in char_budgets:
+                count = int(np.searchsorted(cumulative_chars, budget, side="right"))
+                found = int(cumulative_hits[count - 1]) if count > 0 else 0
+                char_recall_values[budget].append(found / len(relevant_ids))
+                char_accuracy_hits[budget] += int(found > 0)
+
         query_count = len(query_ids)
         for k in eval_ks:
             metrics[f"{self.name}_cosine_accuracy@{k}"] = accuracy_hits[k] / query_count
             metrics[f"{self.name}_cosine_recall@{k}"] = float(np.mean(recall_values[k]))
+        for budget in char_budgets:
+            metrics[f"{self.name}_cosine_char_accuracy@{budget}"] = (
+                char_accuracy_hits[budget] / query_count
+            )
+            metrics[f"{self.name}_cosine_char_recall@{budget}"] = float(
+                np.mean(char_recall_values[budget])
+            )
         metrics[f"{self.name}_cosine_mrr@{DEFAULT_EVAL_MRR_K}"] = float(
             np.mean(reciprocal_ranks)
         )
         metrics[f"{self.name}_runtime"] = time.perf_counter() - started_at
         self.log_wandb_curves(
             eval_ks=eval_ks,
+            char_budgets=char_budgets,
             metrics=metrics,
             epoch=epoch,
             steps=steps,
@@ -226,6 +264,7 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
     def log_wandb_curves(
         self,
         eval_ks: list[int],
+        char_budgets: list[int],
         metrics: dict[str, float],
         epoch: int,
         steps: int,
@@ -236,6 +275,12 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
                 "label": label,
                 "recalls": [metrics[f"{self.name}_cosine_recall@{k}"] for k in eval_ks],
                 "hits": [metrics[f"{self.name}_cosine_accuracy@{k}"] for k in eval_ks],
+                "char_recalls": [
+                    metrics[f"{self.name}_cosine_char_recall@{b}"] for b in char_budgets
+                ],
+                "char_hits": [
+                    metrics[f"{self.name}_cosine_char_accuracy@{b}"] for b in char_budgets
+                ],
             }
         )
 
@@ -251,10 +296,16 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         # before the eval/ and train/ scalar sections in the wandb workspace.
         charts = {
             f"curves/{self.name}_recall_at_k_curve": self.build_curve_figure(
-                eval_ks, "recalls", "recall@k"
+                eval_ks, "recalls", "recall@k", "k"
             ),
             f"curves/{self.name}_hit_at_k_curve": self.build_curve_figure(
-                eval_ks, "hits", "hit@k"
+                eval_ks, "hits", "hit@k", "k"
+            ),
+            f"curves/{self.name}_recall_at_chars_curve": self.build_curve_figure(
+                char_budgets, "char_recalls", "recall@chars", "cumulative characters"
+            ),
+            f"curves/{self.name}_hit_at_chars_curve": self.build_curve_figure(
+                char_budgets, "char_hits", "hit@chars", "cumulative characters"
             ),
         }
         # Log both charts in one call pinned to the trainer's global step, so recall
@@ -275,7 +326,13 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         shape = CURVE_LINE_SHAPES[(index // len(colors)) % len(CURVE_LINE_SHAPES)]
         return {"color": color, **shape}
 
-    def build_curve_figure(self, eval_ks: list[int], value_key: str, ylabel: str):
+    def build_curve_figure(
+        self,
+        x_values: list[int],
+        value_key: str,
+        ylabel: str,
+        xlabel: str = "k",
+    ):
         import plotly.graph_objects as go
 
         fig = go.Figure()
@@ -283,7 +340,7 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
             style = self.series_style(index)
             fig.add_trace(
                 go.Scatter(
-                    x=eval_ks,
+                    x=x_values,
                     y=row[value_key],
                     name=row["label"],
                     mode=style["mode"],
@@ -294,13 +351,13 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
 
         fig.update_layout(
             title=f"{self.name} {ylabel}",
-            xaxis_title="k",
+            xaxis_title=xlabel,
             yaxis_title=ylabel,
             template="plotly_white",
             hovermode="x unified",
             legend=dict(title="checkpoint"),
         )
-        fig.update_xaxes(tickmode="array", tickvals=eval_ks)
+        fig.update_xaxes(tickmode="array", tickvals=x_values)
         fig.update_yaxes(range=[0, 1.02])
         return fig
 
