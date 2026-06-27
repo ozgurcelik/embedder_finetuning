@@ -10,11 +10,12 @@ import os
 import sys
 from typing import Any
 
-from config import Config
+from config import Config, StageConfig, resolve_stage_config
 from dataset_io import select_device
 from embedder_model_registry import resolve_max_seq_length, resolve_model_wrapper
-from retrieval_evaluator import build_retrieval_evaluator
+from retrieval_evaluator import build_retrieval_evaluator, set_evaluator_stage_label
 from training_data import (
+    DEFAULT_OUTPUT_ROOT,
     build_training_rows,
     dataset_spec_from_args,
     default_output_dir,
@@ -85,61 +86,46 @@ def run_final_eval(trainer: Any, evaluator: Any, model: Any, config: Config) -> 
     )
 
 
-def train(config: Config) -> None:
-    from sentence_transformers import (
-        SentenceTransformer,
-        SentenceTransformerTrainer,
-        SentenceTransformerTrainingArguments,
-    )
+def resolve_run_root(config: Config, model_config: Any, stages: list[StageConfig]) -> Any:
+    """Top-level output directory for the run. For a single stage this matches the old
+    models/<model>-<dataset> layout; for a chain it is models/<model>-chain-<stages>."""
+    if config.output_dir is not None:
+        return config.output_dir
+    if len(stages) == 1:
+        stage_config = resolve_stage_config(config, stages[0])
+        return default_output_dir(model_config, dataset_spec_from_args(stage_config))
+    suffix = "-".join(stage.name for stage in stages)
+    return DEFAULT_OUTPUT_ROOT / f"{model_config.output_dir_name}-chain-{suffix}"
+
+
+def resolve_hub_model_id(config: Config, run_root: Any) -> str:
+    if config.hub_model_id:
+        return config.hub_model_id
+    repo_name = run_root.name
+    if config.hub_version:
+        repo_name = f"{repo_name}-{config.hub_version}"
+    return f"{config.hub_account}/{repo_name}"
+
+
+def build_training_args(
+    config: Config,
+    device: str,
+    report_to: str,
+    hub_model_id: str,
+    push_checkpoints_every_save: bool,
+    is_first_stage: bool = True,
+):
+    from sentence_transformers import SentenceTransformerTrainingArguments
     from sentence_transformers.training_args import BatchSamplers
 
-    model_config = resolve_model_wrapper(config.model_key, config.model)
-    dataset_spec = dataset_spec_from_args(config)
-    if config.output_dir is None:
-        config.output_dir = default_output_dir(model_config, dataset_spec)
-
-    if config.hub_model_id:
-        hub_model_id = config.hub_model_id
-    else:
-        repo_name = config.output_dir.name
-        if config.hub_version:
-            repo_name = f"{repo_name}-{config.hub_version}"
-        hub_model_id = f"{config.hub_account}/{repo_name}"
-
-    rows = build_training_rows(config, dataset_spec, model_config)
-    print_dataset_summary(rows)
-
-    if config.dry_run:
-        print("Dry run complete; no model was trained.")
-        return
-
-    report_to = configure_wandb(config)
-    train_dataset = rows_to_dataset(rows)
-    device = select_device()
-    model_kwargs = model_config.sentence_transformer_kwargs()
-    model_kwargs["device"] = device
-    model = SentenceTransformer(
-        model_config.model_name,
-        **model_kwargs,
+    # Only evaluate at the start of the very first stage. For later stages the start
+    # state is identical to the previous stage's final (already-evaluated) checkpoint,
+    # so a start-of-stage eval would just duplicate that point.
+    eval_on_start = (
+        config.eval_strategy != "no" and config.eval_at_start and is_first_stage
     )
-    print(f"Model device: {model.device}")
-    effective_max_seq_length = resolve_max_seq_length(model, config.max_seq_length)
-    if effective_max_seq_length is not None:
-        model.max_seq_length = effective_max_seq_length
-    print(f"Model max_seq_length: {model.max_seq_length}")
-    train_loss = build_loss(
-        model=model,
-        use_cached_mnrl=config.use_cached_mnrl,
-        cached_mini_batch_size=config.cached_mini_batch_size,
-    )
-    evaluator = build_retrieval_evaluator(config, model_config)
 
-    # The trainer's push_to_hub only drives intermediate, per-save-step uploads. The
-    # final end-of-training push is done explicitly after trainer.train() and is gated
-    # on config.push_to_hub alone, so end-only pushing works regardless of this flag.
-    push_checkpoints_every_save = config.push_to_hub and config.push_every_save_step
-
-    training_args = SentenceTransformerTrainingArguments(
+    return SentenceTransformerTrainingArguments(
         output_dir=str(config.output_dir),
         num_train_epochs=config.epochs,
         max_steps=config.max_steps,
@@ -153,7 +139,7 @@ def train(config: Config) -> None:
         save_total_limit=None,
         eval_strategy=config.eval_strategy,
         eval_steps=config.eval_steps if config.eval_strategy == "steps" else None,
-        eval_on_start=config.eval_strategy != "no" and config.eval_at_start,
+        eval_on_start=eval_on_start,
         do_eval=config.eval_strategy != "no",
         fp16=config.fp16,
         bf16=config.bf16,
@@ -174,17 +160,8 @@ def train(config: Config) -> None:
         hub_private_repo=config.hub_private,
     )
 
-    trainer = SentenceTransformerTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        loss=train_loss,
-        evaluator=evaluator,
-    )
-    trainer.train()
 
-    run_final_eval(trainer, evaluator, model, config)
-
+def save_and_push_model(config: Config, model: Any, hub_model_id: str) -> None:
     if config.save_model_locally:
         final_model_dir = config.output_dir / "final"
         model.save_pretrained(str(final_model_dir))
@@ -206,6 +183,103 @@ def train(config: Config) -> None:
             "Note: save_model_locally and push_to_hub are both False; "
             "the trained model was not exported (only trainer checkpoints, if any, remain)."
         )
+
+
+def run_stage_dry_run(config: Config, model_config: Any, stages: list[StageConfig]) -> None:
+    multistage = len(stages) > 1
+    for index, stage in enumerate(stages, start=1):
+        stage_config = resolve_stage_config(config, stage)
+        if multistage:
+            print(f"\n=== Stage {index}/{len(stages)}: {stage.name} ===")
+        rows = build_training_rows(
+            stage_config, dataset_spec_from_args(stage_config), model_config
+        )
+        print_dataset_summary(rows)
+    print("Dry run complete; no model was trained.")
+
+
+def train(config: Config) -> None:
+    from sentence_transformers import SentenceTransformer, SentenceTransformerTrainer
+
+    model_config = resolve_model_wrapper(config.model_key, config.model)
+    # An empty stages list means a single implicit stage built from the top-level fields,
+    # which keeps single-stage runs behaving exactly as before.
+    stages = config.stages or [StageConfig(name=config.train_dataset_key)]
+    multistage = len(stages) > 1
+
+    run_root = resolve_run_root(config, model_config, stages)
+    config.output_dir = run_root
+    hub_model_id = resolve_hub_model_id(config, run_root)
+
+    if config.dry_run:
+        run_stage_dry_run(config, model_config, stages)
+        return
+
+    report_to = configure_wandb(config)
+    device = select_device()
+    model_kwargs = model_config.sentence_transformer_kwargs()
+    model_kwargs["device"] = device
+    model = SentenceTransformer(model_config.model_name, **model_kwargs)
+    print(f"Model device: {model.device}")
+    effective_max_seq_length = resolve_max_seq_length(model, config.max_seq_length)
+    if effective_max_seq_length is not None:
+        model.max_seq_length = effective_max_seq_length
+    print(f"Model max_seq_length: {model.max_seq_length}")
+
+    # Built once and reused across stages so the eval curves accumulate over the chain.
+    evaluator = build_retrieval_evaluator(config, model_config)
+    push_checkpoints_every_save = config.push_to_hub and config.push_every_save_step
+    base_run_name = config.wandb_run_name or run_root.name
+
+    for index, stage in enumerate(stages, start=1):
+        stage_config = resolve_stage_config(config, stage)
+        if multistage:
+            stage_config.output_dir = run_root / f"stage{index}_{stage.name}"
+            stage_config.wandb_run_name = f"{base_run_name}-stage{index}-{stage.name}"
+            set_evaluator_stage_label(evaluator, stage.name)
+            print(f"\n=== Stage {index}/{len(stages)}: {stage.name} ===")
+        else:
+            stage_config.output_dir = run_root
+            stage_config.wandb_run_name = base_run_name
+            set_evaluator_stage_label(evaluator, "")
+
+        rows = build_training_rows(
+            stage_config, dataset_spec_from_args(stage_config), model_config
+        )
+        print_dataset_summary(rows)
+        train_dataset = rows_to_dataset(rows)
+        train_loss = build_loss(
+            model=model,
+            use_cached_mnrl=stage_config.use_cached_mnrl,
+            cached_mini_batch_size=stage_config.cached_mini_batch_size,
+        )
+        training_args = build_training_args(
+            stage_config,
+            device,
+            report_to,
+            hub_model_id,
+            push_checkpoints_every_save,
+            is_first_stage=index == 1,
+        )
+        trainer = SentenceTransformerTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            loss=train_loss,
+            evaluator=evaluator,
+        )
+        trainer.train()
+        run_final_eval(trainer, evaluator, model, stage_config)
+
+        # Finish the per-stage W&B run so the next stage starts a fresh run with its own
+        # monotonic step axis. The evaluator keeps its history, so each subsequent stage's
+        # run still shows the full accumulated curve across all stages so far.
+        if report_to == "wandb" and multistage:
+            import wandb
+
+            wandb.finish()
+
+    save_and_push_model(config, model, hub_model_id)
 
 
 def main() -> int:

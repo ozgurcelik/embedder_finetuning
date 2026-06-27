@@ -130,6 +130,9 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         self.greater_is_better = True
         self.primary_metric = f"{name}_cosine_mrr@{DEFAULT_EVAL_MRR_K}"
         self.eval_history: list[dict[str, Any]] = []
+        # Prefix added to curve series labels so multi-stage chains stay distinguishable
+        # (e.g. "oqa-v1 epoch 1"). Empty for single-stage runs.
+        self.stage_label = ""
 
     def __call__(self, model: Any, output_path: str | None = None, epoch: int = -1, steps: int = -1):
         import json
@@ -371,6 +374,9 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
         else:
             base_label = f"eval {len(self.eval_history) + 1}"
 
+        if self.stage_label:
+            base_label = f"{self.stage_label} {base_label}"
+
         existing_labels = {row["label"] for row in self.eval_history}
         if base_label not in existing_labels:
             return base_label
@@ -383,6 +389,19 @@ class RegistryRetrievalEvaluator(SentenceEvaluator):
     @property
     def description(self) -> str:
         return "Registry Retrieval"
+
+
+def set_evaluator_stage_label(evaluator: Any, stage_label: str) -> None:
+    """Set the stage label on a RegistryRetrievalEvaluator or every sub-evaluator inside
+    a SequentialEvaluator, so accumulated curve series are tagged with the current stage."""
+    if evaluator is None:
+        return
+    if isinstance(evaluator, RegistryRetrievalEvaluator):
+        evaluator.stage_label = stage_label
+        return
+    for sub_evaluator in getattr(evaluator, "evaluators", []):
+        if isinstance(sub_evaluator, RegistryRetrievalEvaluator):
+            sub_evaluator.stage_label = stage_label
 
 
 def build_single_retrieval_evaluator(

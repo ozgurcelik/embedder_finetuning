@@ -2,13 +2,54 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 
 def require_positive(name: str, value: int) -> None:
     if value <= 0:
         raise ValueError(f"{name} must be positive, got {value}")
+
+
+@dataclass
+class StageConfig:
+    """One training stage in a chain. Every field except `name` defaults to None,
+    meaning "inherit from the base Config". Set only what should differ for this stage.
+
+    Stages run sequentially on the same model, so weights carry over from one to the
+    next. Global settings (model, precision, evaluation, W&B, Hub, output root) always
+    come from the base Config; only the fields below can vary per stage."""
+
+    name: str = "stage"
+
+    # --- Training dataset (None inherits from Config) ---
+    train_dataset_key: str | None = None
+    train_dataset_name: str | None = None
+    train_dataset_config: str | None = None
+    train_splits: list[str] | None = None
+    query_column: str | None = None
+    positive_column: str | None = None
+    train_query_fact_ids: Path | None = None
+    train_facts: Path | None = None
+    negatives_per_query: int | None = None
+    max_train_samples: int | None = None
+
+    # --- Optimization (None inherits from Config) ---
+    epochs: int | None = None
+    max_steps: int | None = None
+    batch_size: int | None = None
+    gradient_accumulation_steps: int | None = None
+    learning_rate: float | None = None
+    warmup_ratio: float | None = None
+    seed: int | None = None
+
+    # --- Loss (None inherits from Config) ---
+    use_cached_mnrl: bool | None = None
+    cached_mini_batch_size: int | None = None
+
+    # --- Checkpointing (None inherits from Config) ---
+    save_strategy: str | None = None
+    save_steps: int | None = None
 
 
 @dataclass
@@ -79,6 +120,24 @@ class Config:
     push_every_save_step: bool = False  # push at every save step, not only at the end
     hub_private: bool = False  # create the hub repo as private
 
+    # --- Multi-stage training ---
+    # Optional chain of training stages run sequentially on the same model (weights
+    # carry over). Each StageConfig overrides only the fields it sets; everything else
+    # inherits from this Config. Leave empty for a single-stage run using the fields
+    # above. Example:
+    #   stages = [
+    #       StageConfig(name="oqa-v1", train_dataset_key="oqa-v1", epochs=1),
+    #       StageConfig(name="qaitrain500-500", train_dataset_key="qaitrain500-500", epochs=2),
+    #   ]
+    stages: list[StageConfig] = field(
+        default_factory=lambda: [
+            StageConfig(name="oqa-v1", train_dataset_key="oqa-v1", epochs=1),
+            StageConfig(
+                name="qaitrain500-500", train_dataset_key="qaitrain500-500", epochs=2
+            ),
+        ]
+    )
+
     # --- Misc ---
     dry_run: bool = False  # prepare data, print a summary, then exit before training
     use_cached_mnrl: bool = False  # CachedMultipleNegativesRankingLoss for bigger batches
@@ -136,3 +195,18 @@ class Config:
                 raise ValueError(
                     "push_every_save_step requires save_strategy to be 'steps' or 'epoch'"
                 )
+        # Validate each stage by resolving it against this base config and checking the
+        # merged result (resolve clears `stages`, so this does not recurse infinitely).
+        for stage in self.stages:
+            resolve_stage_config(self, stage).validate()
+
+
+def resolve_stage_config(base: Config, stage: StageConfig) -> Config:
+    """Merge a StageConfig onto a base Config: every non-None stage field overrides the
+    base value; everything else is inherited. The returned Config has `stages` cleared."""
+    overrides = {
+        f.name: getattr(stage, f.name)
+        for f in fields(stage)
+        if f.name != "name" and getattr(stage, f.name) is not None
+    }
+    return replace(base, stages=[], **overrides)
