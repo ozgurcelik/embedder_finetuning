@@ -49,6 +49,13 @@ class StageConfig:
     use_cached_mnrl: bool | None = None
     cached_mini_batch_size: int | None = None
 
+    # --- Evaluation (None inherits from Config) ---
+    eval_strategy: str | None = None  # "steps" | "epoch" | "no"
+    eval_steps: int | None = None  # absolute steps between evals (eval_strategy == "steps")
+    # Evaluate this many times per epoch; overrides eval_steps and forces step-based eval.
+    # e.g. 4 -> evaluate every 1/4 epoch, 2 -> every half epoch.
+    evals_per_epoch: int | None = None
+
     # --- Checkpointing (None inherits from Config) ---
     save_strategy: str | None = None
     save_steps: int | None = None
@@ -57,7 +64,7 @@ class StageConfig:
 @dataclass
 class Config:
     # --- Model ---
-    model_key: str = "all-mpnet-base-v2"
+    model_key: str = "nomic-embed-text-v1.5"
     model: str | None = None  # optional name/path override; model_key still controls encoding
     output_dir: Path | None = None  # defaults to models/<model>-<dataset>
 
@@ -109,6 +116,9 @@ class Config:
     # --- Evaluation ---
     eval_strategy: str = "epoch"  # "steps" | "epoch" | "no"
     eval_steps: int = 100  # only used when eval_strategy == "steps"
+    # Evaluate this many times per epoch; overrides eval_steps and forces step-based eval
+    # (e.g. 4 -> every 1/4 epoch). None keeps the eval_strategy/eval_steps above.
+    evals_per_epoch: int | None = None
     # Which eval datasets to run; keys come from EVAL_DATASET_REGISTRY in retrieval_evaluator.py
     eval_dataset_keys: list[str] = field(
         default_factory=lambda: ["qaitest500-500", "qaitest100-500-2"]
@@ -138,24 +148,46 @@ class Config:
     #   ]
     stages: list[StageConfig] = field(
         default_factory=lambda: [
-            StageConfig(name="oqa-v1", train_dataset_key="oqa-v1", epochs=1),
+            # StageConfig(name="oqa-v1", train_dataset_key="oqa-v1", epochs=1),
             # StageConfig(
             #     name="qaitrain500-500", train_dataset_key="qaitrain500-500", epochs=1
             # ),
             # StageConfig(
             #     name="qaitrain500-2-500", train_dataset_key="qaitrain500-2-500", epochs=1
             # ),
+            # qai-mixed runs first (explicit hard/soft negatives sharpen the top ranks), then
+            # the broad in-batch stage runs last so it has the final say on the embedding
+            # geometry -- the last stage dominates, and the in-batch objective is what
+            # maximizes deep recall@chars.
+            # StageConfig(
+            #     name="qai-mixed",
+            #     train_dataset_keys=["qaitrain500-500", "qaitrain500-2-500"],
+            #     epochs=1,
+            #     learning_rate=5e-6,
+            # ),
+            # Three "fast" datasets (1 positive per query, no curated negatives) mixed into
+            # one in-batch stage: negatives_per_query=0 + batch size 32 (= 31 in-batch
+            # negatives), rows from all three are combined and shuffled together.
             StageConfig(
-                name="qai-mixed",
-                train_dataset_keys=["qaitrain500-500", "qaitrain500-2-500"],
-                epochs=2,
+                name="qai-fast-mixed",
+                train_dataset_keys=[
+                    "qaitrain500-3-5000-fast",
+                    "qaitrain500-5000-fast",
+                    "qaitrain500-2-5000-fast",
+                ],
+                negatives_per_query=0,
+                batch_size=64,
+                epochs=1,
+                # Eval at ~0.25 / 0.5 / 0.75 epoch and at the end (plus the step-0 baseline,
+                # since this can be the first stage).
+                evals_per_epoch=1,
             ),
         ]
     )
 
     # --- Misc ---
     dry_run: bool = False  # prepare data, print a summary, then exit before training
-    use_cached_mnrl: bool = False  # CachedMultipleNegativesRankingLoss for bigger batches
+    use_cached_mnrl: bool = True  # CachedMultipleNegativesRankingLoss for bigger batches
     cached_mini_batch_size: int = 16
 
     def validate(self) -> None:
@@ -166,6 +198,10 @@ class Config:
         require_positive("logging_steps", self.logging_steps)
         if self.eval_strategy == "steps":
             require_positive("eval_steps", self.eval_steps)
+        if self.evals_per_epoch is not None:
+            require_positive("evals_per_epoch", self.evals_per_epoch)
+            if self.eval_strategy == "no":
+                raise ValueError("evals_per_epoch requires eval_strategy to not be 'no'")
         if self.eval_strategy != "no":
             require_positive("eval_batch_size", self.eval_batch_size)
             require_positive("eval_corpus_chunk_size", self.eval_corpus_chunk_size)
@@ -199,7 +235,11 @@ class Config:
             )
         if self.max_train_samples is not None:
             require_positive("max_train_samples", self.max_train_samples)
-        require_positive("negatives_per_query", self.negatives_per_query)
+        # 0 is allowed: it means "no explicit negatives, use in-batch negatives only".
+        if self.negatives_per_query < 0:
+            raise ValueError(
+                f"negatives_per_query must be >= 0, got {self.negatives_per_query}"
+            )
         if self.max_seq_length is not None:
             require_positive("max_seq_length", self.max_seq_length)
         if self.fp16 and self.bf16:

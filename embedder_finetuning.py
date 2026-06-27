@@ -112,6 +112,31 @@ def resolve_hub_model_id(config: Config, run_root: Any) -> str:
     return f"{config.hub_account}/{repo_name}"
 
 
+def resolve_stage_eval_schedule(config: Config, num_train_rows: int) -> None:
+    """When a stage sets evals_per_epoch, translate it into a concrete step-based eval
+    schedule (eval every steps_per_epoch // evals_per_epoch optimizer steps) and switch the
+    stage to eval_strategy="steps". Mutates the resolved stage config in place so
+    build_training_args picks it up. No-op when evals_per_epoch is unset."""
+    if not config.evals_per_epoch:
+        return
+    import math
+
+    effective_batch = config.batch_size * config.gradient_accumulation_steps
+    steps_per_epoch = max(1, math.ceil(num_train_rows / effective_batch))
+    # Round the interval up so the interior evals land at ~1/N, 2/N, ... (N-1)/N of the
+    # epoch and the final multiple falls past the last step; run_final_eval then supplies
+    # the exact end-of-epoch eval. This yields evals_per_epoch points per epoch (the quarter
+    # marks + the epoch end) rather than an extra near-duplicate just before the end.
+    eval_steps = max(1, math.ceil(steps_per_epoch / config.evals_per_epoch))
+    config.eval_strategy = "steps"
+    config.eval_steps = eval_steps
+    print(
+        f"Stage eval schedule: {config.evals_per_epoch}x/epoch -> eval every {eval_steps} "
+        f"steps (~{steps_per_epoch} steps/epoch; plus end-of-epoch eval"
+        f"{', and a step-0 baseline on the first stage' if config.eval_at_start else ''})"
+    )
+
+
 def build_training_args(
     config: Config,
     device: str,
@@ -320,6 +345,7 @@ def train(config: Config) -> None:
         # In a chain, the per-stage trainer must not open its own wandb run; we log to the
         # single shared run via chain_callback instead.
         stage_report_to = "none" if chain_wandb else report_to
+        resolve_stage_eval_schedule(stage_config, len(rows))
         training_args = build_training_args(
             stage_config,
             device,

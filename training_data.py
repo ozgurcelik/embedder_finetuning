@@ -38,6 +38,32 @@ TRAIN_DATASET_REGISTRY = {
         "facts_path": PROJECT_ROOT / "datasets/qaitrain500_2_500_non_summary_dbelements.json",
         "output_suffix": "qaitrain500-2-500",
     },
+    # 1 positive per query, no curated negatives: train with in-batch negatives only
+    # (set negatives_per_query=0 for the stage that uses it).
+    "qaitrain500-3-5000-fast": {
+        "source": "local_query_fact_ids",
+        "query_fact_ids_path": PROJECT_ROOT
+        / "datasets/qaitrain500_3_5000_fast_query_fact_ids.json",
+        "facts_path": PROJECT_ROOT
+        / "datasets/qaitrain500_3_5000_fast_non_summary_dbelements.json",
+        "output_suffix": "qaitrain500-3-5000-fast",
+    },
+    "qaitrain500-5000-fast": {
+        "source": "local_query_fact_ids",
+        "query_fact_ids_path": PROJECT_ROOT
+        / "datasets/qaitrain500_5000_fast_query_fact_ids.json",
+        "facts_path": PROJECT_ROOT
+        / "datasets/qaitrain500_5000_fast_non_summary_dbelements.json",
+        "output_suffix": "qaitrain500-5000-fast",
+    },
+    "qaitrain500-2-5000-fast": {
+        "source": "local_query_fact_ids",
+        "query_fact_ids_path": PROJECT_ROOT
+        / "datasets/qaitrain500_2_5000_fast_query_fact_ids.json",
+        "facts_path": PROJECT_ROOT
+        / "datasets/qaitrain500_2_5000_fast_non_summary_dbelements.json",
+        "output_suffix": "qaitrain500-2-5000-fast",
+    },
     "oqa-v1": {
         "source": "huggingface",
         "name": "m-rousseau/oqa-v1",
@@ -462,16 +488,23 @@ def build_local_fact_training_rows(
                 continue
             seen_pairs.add(pair_key)
 
-            negative_fact_ids = sample_negative_fact_ids(
-                record=record,
-                positive_ids=positive_ids,
-                facts=facts,
-                sample_count=args.negatives_per_query,
-                rng=rng,
-            )
-            if not negative_fact_ids:
-                skipped_insufficient_negatives += 1
-                continue
+            # negatives_per_query == 0 means "no explicit negatives": emit anchor/positive
+            # rows and rely on in-batch negatives (MultipleNegativesRankingLoss treats the
+            # other rows' positives in the batch as negatives). With > 0 we require a full
+            # set of curated negatives and skip rows that cannot supply them.
+            if args.negatives_per_query > 0:
+                negative_fact_ids = sample_negative_fact_ids(
+                    record=record,
+                    positive_ids=positive_ids,
+                    facts=facts,
+                    sample_count=args.negatives_per_query,
+                    rng=rng,
+                )
+                if not negative_fact_ids:
+                    skipped_insufficient_negatives += 1
+                    continue
+            else:
+                negative_fact_ids = []
 
             row = {
                 "anchor": model_config.format_query(query),
@@ -501,10 +534,13 @@ def build_local_fact_training_rows(
         f"{len(rows)} from {prepared_count} candidates, "
         f"{len(records)} query records, {len(facts)} facts"
     )
-    print(
-        "Sampled explicit negatives: "
-        f"{args.negatives_per_query} per row from hard+soft negative IDs"
-    )
+    if args.negatives_per_query > 0:
+        print(
+            "Sampled explicit negatives: "
+            f"{args.negatives_per_query} per row from hard+soft negative IDs"
+        )
+    else:
+        print("Explicit negatives: 0 per row (in-batch negatives only)")
     if skipped:
         print(
             "Skipped local training rows: "
