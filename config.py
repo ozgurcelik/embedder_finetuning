@@ -64,8 +64,10 @@ class StageConfig:
 @dataclass
 class Config:
     # --- Model ---
-    model_key: str = "nomic-embed-text-v1.5"
-    model: str | None = None  # optional name/path override; model_key still controls encoding
+    model_key: str = "all-mpnet-base-v2"
+    # Optional name/path override; model_key still controls encoding/formatting. Point this
+    # at a locally saved model to continue fine-tuning from it (e.g. the saved fast model).
+    model: str | None = "/root/models/all-mpnet-base-v2-qaitrain500-5000-fast/final"
     output_dir: Path | None = None  # defaults to models/<model>-<dataset>
 
     # --- Training dataset ---
@@ -129,7 +131,7 @@ class Config:
     no_eval_csv: bool = False  # set True to skip writing evaluator metric files
 
     # --- Saving & Hugging Face Hub ---
-    save_model_locally: bool = False  # save the final model under output_dir/final
+    save_model_locally: bool = True  # save the final model under output_dir/final
     push_to_hub: bool = False  # push the trained model to the Hugging Face Hub (off by default)
     hub_account: str = "ozgur-celik"  # HF user/org the model is pushed under
     hub_model_id: str | None = None  # full repo id; defaults to <hub_account>/<output_dir name>
@@ -168,19 +170,39 @@ class Config:
             # Three "fast" datasets (1 positive per query, no curated negatives) mixed into
             # one in-batch stage: negatives_per_query=0 + batch size 32 (= 31 in-batch
             # negatives), rows from all three are combined and shuffled together.
+            # StageConfig(
+            #     name="qai-fast-mixed",
+            #     train_dataset_keys=[
+            #         "qaitrain500-3-5000-fast",
+            #         "qaitrain500-5000-fast",
+            #         "qaitrain500-2-5000-fast",
+            #     ],
+            #     negatives_per_query=0,
+            #     batch_size=64,
+            #     epochs=1,
+            #     # Eval at ~0.25 / 0.5 / 0.75 epoch and at the end (plus the step-0 baseline,
+            #     # since this can be the first stage).
+            #     evals_per_epoch=1,
+            # ),
+            # Single in-batch stage on qaitrain500-5000-fast (1 positive per query, no
+            # curated negatives -> in-batch negatives only).
+            # StageConfig(
+            #     name="qaitrain500-5000-fast",
+            #     train_dataset_key="qaitrain500-5000-fast",
+            #     negatives_per_query=0,
+            #     batch_size=32,
+            #     epochs=1,
+            # ),
+            # Continue fine-tuning the saved fast model (Config.model above) on the iterated
+            # hard set: deep positives + 4 hard/4 soft negatives per query (pool of 8, sample
+            # 4). Small + gentle LR to refine without forgetting.
             StageConfig(
-                name="qai-fast-mixed",
-                train_dataset_keys=[
-                    "qaitrain500-3-5000-fast",
-                    "qaitrain500-5000-fast",
-                    "qaitrain500-2-5000-fast",
-                ],
-                negatives_per_query=0,
-                batch_size=64,
-                epochs=1,
-                # Eval at ~0.25 / 0.5 / 0.75 epoch and at the end (plus the step-0 baseline,
-                # since this can be the first stage).
-                evals_per_epoch=1,
+                name="qaitrain500-2-500-iterated",
+                train_dataset_key="qaitrain500-2-500-iterated",
+                negatives_per_query=4,
+                batch_size=16,
+                epochs=3,
+                learning_rate=5e-6,
             ),
         ]
     )

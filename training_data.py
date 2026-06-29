@@ -64,6 +64,16 @@ TRAIN_DATASET_REGISTRY = {
         / "datasets/qaitrain500_2_5000_fast_non_summary_dbelements.json",
         "output_suffix": "qaitrain500-2-5000-fast",
     },
+    # Iterated hard set mined from a fine-tuned model (deep positives + depth-banded
+    # hard/soft negatives); reuses the qaitrain500-2-500 facts corpus.
+    "qaitrain500-2-500-iterated": {
+        "source": "local_query_fact_ids",
+        "query_fact_ids_path": PROJECT_ROOT
+        / "datasets/qaitrain500_2_500_iterated_query_fact_ids.json",
+        "facts_path": PROJECT_ROOT
+        / "datasets/qaitrain500_2_500_non_summary_dbelements.json",
+        "output_suffix": "qaitrain500-2-500-iterated",
+    },
     "oqa-v1": {
         "source": "huggingface",
         "name": "m-rousseau/oqa-v1",
